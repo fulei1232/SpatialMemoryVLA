@@ -1,0 +1,11 @@
+SpatialMemoryVLA uses a local copy of NousResearch/Llama-2-7b-hf only to construct
+the compatible Llama-2 architecture and tokenizer before loading the MemVLA checkpoint.
+
+The public availability of the NousResearch mirror does not alter the applicable
+terms for Llama 2 materials or derivatives. Use, modification, and redistribution
+remain subject to the LLAMA 2 Community License and Acceptable Use Policy. See
+LICENSES/LLAMA2_LICENSE.txt and https://ai.meta.com/llama/license/.
+
+Required redistribution attribution:
+"Llama 2 is licensed under the LLAMA 2 Community License, Copyright (c) Meta
+Platforms, Inc. All Rights Reserved."

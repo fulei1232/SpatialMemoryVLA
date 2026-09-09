@@ -1,0 +1,31 @@
+rank,atomic_skill,hours,seconds,annotations,episodes,xperience_hours,egoverse_hours,example_labels
+1,manipulate,95.107408,342386.668,5522,5522,95.107408,0.000000,Manipulate paper strip | Manipulate paper star | Manipulate puzzle piece | Manipulate puzzle pieces | Manipulate origami star
+2,fold,69.335125,249606.451,2927,2927,69.335125,0.000000,Fold paper strip | Fold cardboard | Fold paper star | Fold cardboard piece | Fold paper strip into star
+3,sort,64.209692,231154.890,3196,3196,64.209692,0.000000,Sort puzzle pieces | Sort beads | Sort origami stars | Sort paper stars | Sort and arrange cardboard pieces
+4,cut,63.009984,226835.943,2645,2645,63.009984,0.000000,Cut cardboard | Cut newspaper | Cut cardboard strip | Cut cardboard piece | Cut cardboard shape
+5,place,44.751112,161104.004,7895,7895,44.751112,0.000000,Place puzzle piece | Place product on shelf | Place cardboard piece | Place item on shelf | Place scissors on table
+6,hold,39.638235,142697.647,6691,6691,39.638235,0.000000,Hold smartphone | Hold paper strip | Hold cardboard piece | Hold phone | Hold water bottle
+7,pick,25.375628,91352.262,7700,7700,25.375628,0.000000,Pick up paper strip | Pick up smartphone | Pick up scissors | Pick up puzzle piece | Pick up phone
+8,adjust,21.959060,79052.617,4233,4233,21.959060,0.000000,Adjusting puzzle piece | Adjust puzzle piece | Adjust cardboard position | Adjust item on shelf | Adjust paper strip
+9,mark,18.791763,67650.347,1255,1255,18.791763,0.000000,Mark cardboard with pen | Mark cardboard piece | Mark cardboard | Mark lines on cardboard | Mark cardboard with pen and ruler
+10,move,16.805973,60501.503,4843,4843,16.805973,0.000000,Move hand away | Move towards shelf | Move away from shelf | Move puzzle piece | Move away from table
+11,walk,12.571725,45258.209,3029,3029,12.571725,0.000000,Walk through office | Walk away | Walking through office | Walk towards workspace | Walk through aisle
+12,wipe,11.861297,42700.670,902,902,11.861297,0.000000,Wipe shelf surface | Wipe shelf | Wipe counter | Wipe surface | Wipe kitchen counter
+13,observe,11.575888,41673.195,2396,2396,11.575888,0.000000,Observe surroundings | Observe workspace | Observe puzzle progress | Observe progress | Observe puzzle pieces
+14,reach,11.246792,40488.452,3710,3710,11.246792,0.000000,Reach into box | Reach for next item | Reach for product | Reach for phone | Reach for next product
+15,draw,8.724173,31407.024,728,728,8.724173,0.000000,Draw line on cardboard | Draw lines on cardboard | Draw line on fabric | Draw line along ruler | Draw line with pen
+16,arrange,8.447640,30411.503,1540,1540,8.447640,0.000000,Arrange paper strips | Arrange puzzle pieces | Arrange cardboard pieces | Arrange Mahjong tiles | Arrange buttons
+17,align,7.536546,27131.566,1489,1489,7.536546,0.000000,Align ruler on cardboard | Align paper strips | Align paper strip | Align product on shelf | Align puzzle piece
+18,position,6.895480,24823.727,2203,2203,6.895480,0.000000,Position puzzle piece | Position ruler on cardboard | Position paper strip | Position cardboard | Position scissors
+19,write,6.774200,24387.121,645,645,6.774200,0.000000,Write on paper | Write number on cardboard | Write on cardboard | Write on cardboard piece | Write on document
+20,use,5.953472,21432.497,1169,1169,5.953472,0.000000,Use smartphone | Use phone | Use mobile phone | Using smartphone | Use utility knife to cut cardboard
+21,inspect,4.669270,16809.372,1210,1210,4.669270,0.000000,Inspect puzzle piece | Inspect cardboard piece | Inspect product | Inspect product box | Inspect bead
+22,release,4.306868,15504.726,2806,2806,4.306868,0.000000,Release paper strip | Release puzzle piece | Release scissors | Release cardboard | Release cardboard piece
+23,grasp,4.252846,15310.244,1662,1662,4.252846,0.000000,Grasp paper strip | Grasp product | Grasp can | Grasp water bottle | Grasp utility knife
+24,roll,4.071033,14655.720,441,441,4.071033,0.000000,Roll paper strip | Roll quilling paper | Rolling paper strip | Roll quilling paper strip | roll paper strip
+25,rinse,3.566838,12840.617,477,477,3.566838,0.000000,Rinse cloth | Rinse cleaning cloth | Rinse cloth in sink | Rinse hands | Rinse bowl
+26,thread,3.486279,12550.605,232,232,3.486279,0.000000,Thread bead onto string | Thread bead onto strip | Thread bead onto paper strip | Thread bead onto cord | Thread beads onto string
+27,scroll,3.449094,12416.738,439,439,3.449094,0.000000,Scroll on smartphone | Scroll on phone | Scroll through phone | Scroll through smartphone feed | Scroll social media feed
+28,interact,3.182323,11456.363,979,979,3.182323,0.000000,Interact with smartphone | Interact with phone | Interacting with phone | Interacting with smartphone | Interact with mobile phone
+29,reposition,3.140375,11305.350,1357,1357,3.140375,0.000000,Reposition cardboard | Reposition ruler | Reposition scissors | Reposition newspaper | Reposition cardboard piece
+30,remove,3.047747,10971.890,1457,1457,3.047747,0.000000,Remove ruler | Remove cut piece | Remove product from shelf | Remove ruler from cardboard | Remove cardboard piece
