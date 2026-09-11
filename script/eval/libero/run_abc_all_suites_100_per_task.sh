@@ -85,9 +85,9 @@ export PRISMATIC_LLAMA2_7B_REPO='./pretrained/NousResearch-Llama-2-7b-hf'
 export LIBERO_CONFIG_PATH="${project_root}/.libero"
 
 declare -A run_dirs=(
-  [A]='/media/fulei/jlu/memoryvla_libero_spatial_ab_A--image_aug'
-  [B]='/media/fulei/jlu/memoryvla_spatial_forcing_libero_spatial_ab_B--image_aug'
-  [C]='/media/fulei/jlu/spatial_memory_libero_spatial_functional--image_aug'
+  [A]="${A_RUN_DIR:-/media/fulei/jlu/memoryvla_libero_spatial_ab_A--image_aug}"
+  [B]="${B_RUN_DIR:-/media/fulei/jlu/memoryvla_spatial_forcing_libero_spatial_ab_B--image_aug}"
+  [C]="${C_RUN_DIR:-/media/fulei/jlu/spatial_memory_libero_spatial_functional--image_aug}"
 )
 models=(A B C)
 IFS=',' read -r -a suites <<< "${SUITES_CSV:-libero_spatial}"
@@ -251,6 +251,7 @@ for model in "${models[@]}"; do
         timeout --signal=TERM "${task_timeout_hours}h" \
           env MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 CUDA_VISIBLE_DEVICES=0 \
           .venv/bin/python evaluation/libero/eval_libero.py \
+            --model "${model}" \
             --task_suite_name "${suite}" \
             --num_trials_per_task "${eval_trials}" \
             --spcial_task_id "${task_id}" \

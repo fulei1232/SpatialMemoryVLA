@@ -34,8 +34,12 @@ def main() -> None:
             with path.open() as handle:
                 for line in handle:
                     record = json.loads(line)
+                    # Some parallel rollout launchers do not pass --model to
+                    # eval_libero.py.  The enclosing A/B/C directory is the
+                    # authoritative model identity for aggregation.
+                    record["model"] = model
                     key = (
-                        record["model"],
+                        model,
                         int(record["runtime_task_index"]),
                         int(record["initial_state_id"]),
                     )

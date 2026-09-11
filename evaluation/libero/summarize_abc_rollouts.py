@@ -72,11 +72,15 @@ def main() -> None:
         writer.writerows(detail_rows)
     csv_path.with_suffix(".csv.tmp").replace(csv_path)
 
-    expected_tasks = {"libero_spatial": 10}
+    suites = sorted({suite for _, suite, _ in records})
+    if not suites:
+        suites = ["libero_spatial"]
+    expected_tasks = {suite: 90 if suite == "libero_90" else 10 for suite in suites}
+    rendered_suites = ", ".join(suites)
     lines = [
         "# A/B/C LIBERO rollout summary",
         "",
-        "Protocol: LIBERO-Spatial only; 50 episodes/task using each official initial state once; seed 7; CFG 1.5; action chunk 8.",
+        f"Protocol: {rendered_suites}; 50 episodes/task using each official initial state once; seed 7; CFG 1.5; action chunk 8.",
         "",
         "| Model | Suite | Tasks attempted/expected | Skipped | Episodes | Successes | Success rate |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
