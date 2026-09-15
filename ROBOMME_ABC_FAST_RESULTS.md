@@ -1,6 +1,6 @@
-# RoboMME A/B Fast Ablation (5k Steps)
+# RoboMME A/B/C Fast Ablation (5k Steps)
 
-This artifact contains the completed A/B runs from the parameter-efficient
+This artifact contains the completed A/B/C runs from the parameter-efficient
 RoboMME ablation on four NVIDIA A100 80GB GPUs.
 
 ## Shared training configuration
@@ -24,6 +24,8 @@ RoboMME ablation on four NVIDIA A100 80GB GPUs.
 - A (`memoryvla`): spatial forcing disabled, spatial memory disabled.
 - B (`spatial_forcing`): spatial forcing enabled with a frozen VGGT-1B
   teacher, spatial memory disabled.
+- C (`spatial_memory`): spatial forcing and spatial memory enabled with a
+  frozen VGGT-1B teacher.
 
 ## Completed outputs
 
@@ -31,11 +33,12 @@ RoboMME ablation on four NVIDIA A100 80GB GPUs.
 | --- | ---: | ---: | --- |
 | A | 5,000 | 0.014218 | `A/checkpoints/step-005000-epoch-00-loss=0.0142.pt` |
 | B | 5,000 | 0.014952 | `B/checkpoints/step-005000-epoch-00-loss=0.0150.pt` |
+| C | 5,000 | 0.016509 | `C/checkpoints/step-005000-epoch-00-loss=0.0165.pt` |
 
 Each group includes its final optimizer state, configuration, dataset
 statistics, complete JSONL metrics, and checkpoint event log. Intermediate
-checkpoints are intentionally omitted from the Hub artifact because the full
-A/B run directories are approximately 368 GB.
+checkpoints are intentionally omitted from the Hub artifact because they would
+add hundreds of gigabytes of redundant snapshots.
 
 The implementation and launch scripts are maintained in
 `fulei1232/SpatialMemoryVLA`.
