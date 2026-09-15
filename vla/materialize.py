@@ -5,8 +5,11 @@ Factory class for initializing Open-X RLDS-backed datasets, given specified data
 exports individual functions for clear control flow.
 """
 
+import json
 from pathlib import Path
 from typing import Tuple, Type, Union
+
+import numpy as np
 
 from transformers import PreTrainedTokenizerBase
 from torch.utils.data import Dataset
@@ -14,7 +17,15 @@ from torch.utils.data import Dataset
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import ImageTransform
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
-from vla.datasets import EpisodicRLDSDataset, RLDSBatchTransform, RLDSDataset, GroupRLDSDataset, StreamRLDSDataset
+from vla.datasets import (
+    EpisodicRLDSDataset,
+    GroupRLDSDataset,
+    RLDSBatchTransform,
+    RLDSDataset,
+    RoboMMEBatchTransform,
+    RoboMMEPickleDataset,
+    StreamRLDSDataset,
+)
 from vla.action_tokenizer import ActionTokenizer
 
 
@@ -34,6 +45,7 @@ def get_vla_dataset_and_collator(
     load_all_data_for_training: bool = True,  # Load all data for training, or only a subset
     dataloader_type: str = "group",
     group_size: int = 16,
+    seed: int = 42,
 ) -> Tuple[Dataset, ActionTokenizer, PaddedCollatorForActionPrediction]:
     """Initialize RLDS Dataset (wraps TFDS), ActionTokenizer, and initialize transform/collation functions."""
 
@@ -49,6 +61,29 @@ def get_vla_dataset_and_collator(
     collator = PaddedCollatorForActionPrediction(
         tokenizer.model_max_length, tokenizer.pad_token_id, padding_side=padding_side,
     )
+
+    if data_mix == "robomme":
+        norm_stats_path = Path(data_root_dir) / "meta" / "norm_stats.json"
+        if not norm_stats_path.is_file():
+            raise FileNotFoundError(f"Missing RoboMME normalization statistics: {norm_stats_path}")
+        raw_stats = json.loads(norm_stats_path.read_text())
+        action_stats = raw_stats.get("norm_stats", raw_stats)["actions"]
+        robomme_transform = RoboMMEBatchTransform(
+            base_tokenizer=tokenizer,
+            image_transform=image_transform,
+            prompt_builder_fn=prompt_builder_fn,
+            action_q01=np.asarray(action_stats["q01"], dtype=np.float32),
+            action_q99=np.asarray(action_stats["q99"], dtype=np.float32),
+            action_horizon=future_action_window_size + 1,
+            image_aug=image_aug,
+        )
+        dataset = RoboMMEPickleDataset(
+            data_root_dir=data_root_dir,
+            batch_transform=robomme_transform,
+            group_size=group_size,
+            seed=seed,
+        )
+        return dataset, action_tokenizer, collator
 
     # Build RLDS Iterable Dataset
     if dataloader_type == "normal":

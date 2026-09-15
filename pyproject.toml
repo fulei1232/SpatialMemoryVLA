@@ -6,13 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "memvla"
 description = "MemoryVLA: Perceptual-Cognitive Memory in Vision-Language-Action Models for Robotic Manipulation"
 version = "0.0.1"
-readme = "README.md"
+readme = "SPATIAL_MEMORYVLA_BRIEF.md"
 # Support the Python 3.10 release series documented in the README.  `==3.10`
 # only accepts 3.10.0 under PEP 440, rejecting common patch releases such as
 # Python 3.10.12.
 requires-python = ">=3.10,<3.11"
 keywords = ["vision-language-actions models", " robotic manipulation", "memory"]
-license = {file = "LICENSE"}
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -43,12 +42,15 @@ dependencies = [
     "protobuf",
     "rich",
     "sentencepiece==0.1.99",
+    "setuptools<81",
     "timm==0.9.10",
     "tokenizers==0.19.1",
     "transformers==4.40.1",
-    "wandb",
+    "wandb==0.16.3",
     "tensorflow==2.15.0",
     "tensorflow_datasets==4.9.3",
+    "tensorflow-metadata==1.14.0",
+    "array-record==0.5.0",
     "tensorflow_graphics==2021.12.3",
     "huggingface-hub==0.29.3",
     "numpy==1.26.4",
@@ -107,3 +109,6 @@ ignore = ["F722"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401"]
+
+[tool.uv.sources]
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.5/flash_attn-2.5.5%2Bcu122torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" }

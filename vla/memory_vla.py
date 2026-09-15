@@ -389,6 +389,7 @@ class MemoryVLA(nn.Module):
         super().__init__()
 
         self.vlm = vlm
+        self.action_dim = action_dim
         self.future_action_window_size = future_action_window_size
         self.use_ema = use_ema
         self.norm_stats = norm_stats
@@ -636,8 +637,8 @@ class MemoryVLA(nn.Module):
             assert tuple(cog_tokens.shape[-2:]) == (1, self.cog_token_size), (
                 f"Cognitive token must be [B,1,{self.cog_token_size}], got {tuple(cog_tokens.shape)}"
             )
-            assert tuple(actions_future.shape[-2:]) == (self.future_action_window_size + 1, 7), (
-                "Action GT must be [B,16,7] for future_action_window_size=15, "
+            assert tuple(actions_future.shape[-2:]) == (self.future_action_window_size + 1, self.action_dim), (
+                f"Action GT must be [B,{self.future_action_window_size + 1},{self.action_dim}], "
                 f"got {tuple(actions_future.shape)}"
             )
         actions_repeated = actions_future.repeat(repeated_diffusion_steps, 1, 1)
@@ -774,7 +775,19 @@ class MemoryVLA(nn.Module):
 
         # Load ActionModel from Checkpoint
         if "action_model" in model_state_dict:
-            memory_vla.action_model.load_state_dict(model_state_dict["action_model"], strict=False)
+            target_state = memory_vla.action_model.state_dict()
+            compatible_state = {
+                key: value
+                for key, value in model_state_dict["action_model"].items()
+                if key in target_state and target_state[key].shape == value.shape
+            }
+            skipped = sorted(set(model_state_dict["action_model"]) - set(compatible_state))
+            memory_vla.action_model.load_state_dict(compatible_state, strict=False)
+            if skipped:
+                overwatch.warning(
+                    "Skipped shape-incompatible ActionModel weights while adapting the action dimension: "
+                    + ", ".join(skipped)
+                )
             assert use_ema is False, "Does not support using EMA weights from pretrained checkpoint."
             if "ema_diffusion" in model_state_dict and use_ema:
                 memory_vla.ema_diffusion.load_state_dict(model_state_dict["ema_diffusion"])

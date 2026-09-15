@@ -284,6 +284,7 @@ def train(cfg: TrainConfig) -> None:
         future_action_window_size=cfg.future_action_window_size,
         dataloader_type=cfg.dataloader_type,
         group_size=cfg.group_size,
+        seed=cfg.seed,
     )
 
     # Save dataset statistics for de-normalization at inference time

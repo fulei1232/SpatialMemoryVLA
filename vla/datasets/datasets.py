@@ -6,13 +6,17 @@ format to OpenVLA, IterableDataset shim.
 """
 
 from dataclasses import dataclass
+import json
+import pickle
 from pathlib import Path
 from typing import Any, Dict, Tuple, Type
+from zipfile import ZipFile
 
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, IterableDataset
+from torchvision import transforms as tv_transforms
 from transformers import PreTrainedTokenizerBase
 import tensorflow as tf
 
@@ -92,6 +96,167 @@ class RLDSBatchTransform:
                     timesteps=timesteps,
                     episode_ids=None,
                     )
+
+
+@dataclass
+class RoboMMEBatchTransform:
+    """Convert one official RoboMME preprocessed pickle into MemoryVLA inputs."""
+
+    base_tokenizer: PreTrainedTokenizerBase
+    image_transform: ImageTransform
+    prompt_builder_fn: Type[PromptBuilder]
+    action_q01: np.ndarray
+    action_q99: np.ndarray
+    action_horizon: int = 16
+    image_aug: bool = False
+
+    def __call__(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        image = Image.fromarray(np.asarray(sample["image"], dtype=np.uint8))
+        if self.image_aug:
+            image = tv_transforms.Compose(
+                [
+                    tv_transforms.RandomResizedCrop(image.size[::-1], scale=(0.9, 0.9), ratio=(1.0, 1.0)),
+                    tv_transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+                ]
+            )(image)
+        instruction = str(sample["prompt"]).lower()
+
+        prompt_builder = self.prompt_builder_fn("openvla")
+        for turn in (
+            {"from": "human", "value": f"What action should the robot take to {instruction}?"},
+            {"from": "gpt", "value": ""},
+        ):
+            prompt_builder.add_turn(turn["from"], turn["value"])
+
+        input_ids = torch.tensor(
+            self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+        )
+        labels = input_ids.clone()
+        eos_positions = torch.where(input_ids == 2)[0]
+        if len(eos_positions) == 0:
+            raise ValueError("RoboMME prompt is missing the expected Llama EOS token (id=2)")
+        labels[: int(eos_positions[0])] = IGNORE_INDEX
+
+        actions = np.asarray(sample["actions"], dtype=np.float32)
+        if actions.ndim != 2 or actions.shape[1] != 8:
+            raise ValueError(f"Expected RoboMME actions [T,8], got {actions.shape}")
+        state = np.asarray(sample["state"], dtype=np.float32)
+        if state.shape != (8,):
+            raise ValueError(f"Expected RoboMME state [8], got {state.shape}")
+
+        # RoboMME stores absolute joint targets. Its official RoboMMEDataConfig
+        # converts the first seven joints to deltas and keeps the gripper
+        # command (dimension 8) absolute before applying action normalization.
+        actions = actions.copy()
+        actions[:, :7] -= state[None, :7]
+        if actions.shape[0] < self.action_horizon:
+            actions = np.concatenate(
+                [actions, np.repeat(actions[-1:], self.action_horizon - actions.shape[0], axis=0)], axis=0
+            )
+        actions = actions[: self.action_horizon]
+        actions = 2.0 * (actions - self.action_q01) / (self.action_q99 - self.action_q01 + 1e-8) - 1.0
+        actions = np.clip(actions, -1.0, 1.0)
+
+        return {
+            "pixel_values": self.image_transform(image),
+            "input_ids": input_ids,
+            "labels": labels,
+            "dataset_name": "robomme",
+            "actions": torch.from_numpy(actions.astype(np.float32, copy=False)),
+            "action_masks": torch.ones(self.action_horizon, dtype=torch.bool),
+            "timesteps": np.asarray(sample["step_idx"], dtype=np.int64).reshape(1),
+            "episode_ids": np.asarray(sample["epis_idx"], dtype=np.int64).reshape(1),
+        }
+
+
+class RoboMMEPickleDataset(IterableDataset):
+    """Grouped, rank-sharded reader for the official RoboMME preprocessed dataset."""
+
+    def __init__(
+        self,
+        data_root_dir: Path,
+        batch_transform: RoboMMEBatchTransform,
+        group_size: int = 16,
+        seed: int = 42,
+    ) -> None:
+        self.data_root_dir = Path(data_root_dir)
+        self.data_dir = self.data_root_dir / "data"
+        stats_path = self.data_root_dir / "meta" / "stats.json"
+        if not stats_path.is_file() or not self.data_dir.is_dir():
+            raise FileNotFoundError(
+                f"RoboMME dataset must contain data/part_*.zip (or data/*.pkl) and "
+                f"meta/stats.json under {self.data_root_dir}"
+            )
+        stats = json.loads(stats_path.read_text())
+        self.dataset_length = int(stats.get("execution_samples", stats.get("total_samples", 0)))
+        if self.dataset_length <= 0:
+            raise ValueError(f"Invalid RoboMME sample count in {stats_path}: {stats}")
+
+        self.archive_paths = sorted(self.data_dir.glob("part_*.zip"))
+        self.sample_to_archive = None
+        if self.archive_paths:
+            sample_to_archive = np.full(self.dataset_length, -1, dtype=np.int16)
+            for archive_idx, archive_path in enumerate(self.archive_paths):
+                with ZipFile(archive_path) as archive:
+                    for member in archive.namelist():
+                        if not member.endswith(".pkl"):
+                            continue
+                        sample_idx = int(Path(member).stem)
+                        if 0 <= sample_idx < self.dataset_length:
+                            sample_to_archive[sample_idx] = archive_idx
+            missing = np.flatnonzero(sample_to_archive < 0)
+            if len(missing):
+                raise ValueError(
+                    f"RoboMME ZIP archives are missing {len(missing)} samples; first missing index is {missing[0]}"
+                )
+            self.sample_to_archive = sample_to_archive
+        elif not (self.data_dir / "0.pkl").is_file():
+            raise FileNotFoundError(
+                f"No RoboMME part_*.zip archives or extracted pickle samples found in {self.data_dir}"
+            )
+        self.batch_transform = batch_transform
+        self.group_size = group_size
+        self.seed = seed
+        self.dataset_statistics = {
+            "robomme": {
+                "action": {
+                    "q01": batch_transform.action_q01.tolist(),
+                    "q99": batch_transform.action_q99.tolist(),
+                }
+            }
+        }
+
+    def __len__(self) -> int:
+        return self.dataset_length
+
+    def __iter__(self):
+        import torch.distributed as dist
+
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+        num_groups = (self.dataset_length + self.group_size - 1) // self.group_size
+        open_archives = {}
+        epoch = 0
+        while True:
+            groups = np.arange(num_groups)
+            np.random.default_rng(self.seed + epoch).shuffle(groups)
+            for group_idx in groups[rank::world_size]:
+                start = int(group_idx) * self.group_size
+                stop = min(start + self.group_size, self.dataset_length)
+                for sample_idx in range(start, stop):
+                    if self.sample_to_archive is None:
+                        with (self.data_dir / f"{sample_idx}.pkl").open("rb") as handle:
+                            sample = pickle.load(handle)
+                    else:
+                        archive_idx = int(self.sample_to_archive[sample_idx])
+                        archive = open_archives.get(archive_idx)
+                        if archive is None:
+                            archive = ZipFile(self.archive_paths[archive_idx])
+                            open_archives[archive_idx] = archive
+                        with archive.open(f"{sample_idx}.pkl") as handle:
+                            sample = pickle.load(handle)
+                    yield self.batch_transform(sample)
+            epoch += 1
 
 
 class RLDSDataset(IterableDataset):
