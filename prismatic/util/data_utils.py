@@ -121,6 +121,15 @@ class PaddedCollatorForActionPrediction:
         else:
             timesteps = None
 
+        occlusion_flags = None
+        if "occlusion_flags" in instances[0]:
+            occlusion_flags = np.concatenate([instance["occlusion_flags"] for instance in instances], axis=0)
+        occlusion_strengths = None
+        if "occlusion_strengths" in instances[0]:
+            occlusion_strengths = np.concatenate(
+                [instance["occlusion_strengths"] for instance in instances], axis=0
+            )
+
         # For now, we only support Tokenizers with `padding_side = "right"` during training
         #   => Handle padding via RNN Utils => `pad_sequence`
         assert self.padding_side == "right", f"Invalid Tokenizer `{self.padding_side = }`"
@@ -162,6 +171,8 @@ class PaddedCollatorForActionPrediction:
             dataset_names=dataset_names,
             episode_ids=episode_ids,
             timesteps=timesteps,
+            occlusion_flags=occlusion_flags,
+            occlusion_strengths=occlusion_strengths,
         )
 
         return output

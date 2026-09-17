@@ -27,6 +27,7 @@ from vla.datasets import (
     StreamRLDSDataset,
 )
 from vla.action_tokenizer import ActionTokenizer
+from vla.datasets.memory_curriculum import MemoryCurriculumConfig
 
 
 def get_vla_dataset_and_collator(
@@ -46,6 +47,14 @@ def get_vla_dataset_and_collator(
     dataloader_type: str = "group",
     group_size: int = 16,
     seed: int = 42,
+    episode_manifest_path: Union[str, Path, None] = None,
+    memory_curriculum_enabled: bool = False,
+    memory_curriculum_type: str = "normal",
+    occlusion_probability: float = 0.5,
+    occlusion_start_ratio: float = 0.4,
+    occlusion_duration_ratio: float = 0.2,
+    occlusion_recovery_ratio: Union[float, None] = None,
+    occlusion_strength: str = "full",
 ) -> Tuple[Dataset, ActionTokenizer, PaddedCollatorForActionPrediction]:
     """Initialize RLDS Dataset (wraps TFDS), ActionTokenizer, and initialize transform/collation functions."""
 
@@ -56,6 +65,16 @@ def get_vla_dataset_and_collator(
         image_transform,
         prompt_builder_fn,
         predict_stop_token=predict_stop_token,
+        memory_curriculum=MemoryCurriculumConfig(
+            enabled=memory_curriculum_enabled,
+            curriculum_type=memory_curriculum_type,
+            probability=occlusion_probability,
+            start_ratio=occlusion_start_ratio,
+            duration_ratio=occlusion_duration_ratio,
+            recovery_ratio=occlusion_recovery_ratio,
+            strength=occlusion_strength,
+            seed=seed,
+        ),
     )
 
     collator = PaddedCollatorForActionPrediction(
@@ -76,12 +95,23 @@ def get_vla_dataset_and_collator(
             action_q99=np.asarray(action_stats["q99"], dtype=np.float32),
             action_horizon=future_action_window_size + 1,
             image_aug=image_aug,
+            memory_curriculum=MemoryCurriculumConfig(
+                enabled=memory_curriculum_enabled,
+                curriculum_type=memory_curriculum_type,
+                probability=occlusion_probability,
+                start_ratio=occlusion_start_ratio,
+                duration_ratio=occlusion_duration_ratio,
+                recovery_ratio=occlusion_recovery_ratio,
+                strength=occlusion_strength,
+                seed=seed,
+            ),
         )
         dataset = RoboMMEPickleDataset(
             data_root_dir=data_root_dir,
             batch_transform=robomme_transform,
             group_size=group_size,
             seed=seed,
+            episode_manifest_path=episode_manifest_path,
         )
         return dataset, action_tokenizer, collator
 
@@ -97,6 +127,7 @@ def get_vla_dataset_and_collator(
             future_action_window_size=future_action_window_size,
             image_aug=image_aug,
             load_all_data_for_training=load_all_data_for_training,
+            seed=seed,
         )
     elif dataloader_type == "group":
         assert group_size > 1, "Group size must be greater than 1 for grouped dataset"
@@ -111,6 +142,7 @@ def get_vla_dataset_and_collator(
             image_aug=image_aug,
             load_all_data_for_training=load_all_data_for_training,
             group_size=group_size,
+            seed=seed,
         )
     elif dataloader_type == "stream":
         dataset = StreamRLDSDataset(
@@ -123,6 +155,7 @@ def get_vla_dataset_and_collator(
             future_action_window_size=future_action_window_size,
             image_aug=image_aug,
             load_all_data_for_training=load_all_data_for_training,
+            seed=seed,
         )
 
     else:

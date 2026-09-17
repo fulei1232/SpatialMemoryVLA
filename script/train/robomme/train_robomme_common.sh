@@ -89,6 +89,22 @@ unfreeze_last_llm_layer="${UNFREEZE_LAST_LLM_LAYER:-False}"
 enable_gradient_checkpointing="${ENABLE_GRADIENT_CHECKPOINTING:-True}"
 run_id="${RUN_ID:-${default_run_id}}"
 run_root_dir="${RUN_ROOT_DIR:-${storage_root}/runs/robomme}"
+mem_length="${MEM_LENGTH:-16}"
+dataloader_type="${DATALOADER_TYPE:-group}"
+memory_curriculum_enabled="${MEMORY_CURRICULUM_ENABLED:-False}"
+memory_curriculum_type="${MEMORY_CURRICULUM_TYPE:-normal}"
+occlusion_probability="${OCCLUSION_PROBABILITY:-0.5}"
+occlusion_start_ratio="${OCCLUSION_START_RATIO:-0.4}"
+occlusion_duration_ratio="${OCCLUSION_DURATION_RATIO:-0.2}"
+occlusion_strength="${OCCLUSION_STRENGTH:-full}"
+episode_manifest_path="${EPISODE_MANIFEST_PATH:-}"
+gate_diagnostics_path="${GATE_DIAGNOSTICS_PATH:-${run_root_dir}/${run_id}--image_aug/diagnostics/gate.csv}"
+
+manifest_args=()
+if [[ -n "${episode_manifest_path}" ]]; then
+  [[ -f "${episode_manifest_path}" ]] || { echo "ERROR: episode manifest is missing: ${episode_manifest_path}" >&2; exit 10; }
+  manifest_args=(--episode_manifest_path "${episode_manifest_path}")
+fi
 
 if [[ "${SKIP_CUDA_CHECK:-0}" != "1" ]]; then
   CUDA_VISIBLE_DEVICES="${visible_gpus}" "${project_root}/.venv/bin/python" -c \
@@ -132,6 +148,12 @@ freeze LLM backbone: ${freeze_llm_backbone}
 freeze vision backbone: ${freeze_vision_backbone}
 unfreeze last LLM layer: ${unfreeze_last_llm_layer}
 gradient checkpointing: ${enable_gradient_checkpointing}
+memory length/group size: ${mem_length} / 16
+dataloader type: ${dataloader_type}
+memory curriculum: ${memory_curriculum_enabled} (${memory_curriculum_type})
+episode manifest: ${episode_manifest_path:-none}
+occlusion probability/start/duration/strength: ${occlusion_probability} / ${occlusion_start_ratio} / ${occlusion_duration_ratio} / ${occlusion_strength}
+gate diagnostics: ${gate_diagnostics_path}
 EOF
 
 CUDA_VISIBLE_DEVICES="${visible_gpus}" \
@@ -161,8 +183,16 @@ CUDA_VISIBLE_DEVICES="${visible_gpus}" \
   --action_dim 8 \
   --action_model_type DiT-L \
   --repeated_diffusion_steps "${repeated_diffusion_steps}" \
-  --dataloader_type group \
+  --dataloader_type "${dataloader_type}" \
   --group_size 16 \
-  --mem_length 16 \
+  --mem_length "${mem_length}" \
+  --memory_curriculum_enabled "${memory_curriculum_enabled}" \
+  --memory_curriculum_type "${memory_curriculum_type}" \
+  --occlusion_probability "${occlusion_probability}" \
+  --occlusion_start_ratio "${occlusion_start_ratio}" \
+  --occlusion_duration_ratio "${occlusion_duration_ratio}" \
+  --occlusion_strength "${occlusion_strength}" \
+  --gate_diagnostics_path "${gate_diagnostics_path}" \
+  "${manifest_args[@]}" \
   "${spatial_args[@]}" \
   --trackers jsonl

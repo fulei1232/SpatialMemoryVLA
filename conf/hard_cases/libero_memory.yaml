@@ -1,0 +1,46 @@
+storage_root: /media/fulei/jlu/SpatialMemoryVLA
+output_root: /media/fulei/jlu/SpatialMemoryVLA/datasets/libero_memory
+
+tasks:
+  - suite: libero_spatial
+    name: pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate
+    target_object: akita_black_bowl_1
+    anchor_object: plate_1
+  - suite: libero_spatial
+    name: pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate
+    target_object: akita_black_bowl_1
+    anchor_object: plate_1
+
+relocation:
+  probability: 0.30
+  timestep_range: [60, 120]
+  translation_m:
+    - [0.05, 0.00, 0.00]
+    - [0.10, 0.00, 0.00]
+    - [0.15, 0.00, 0.00]
+  rotation_range_radians: [-0.35, 0.35]
+
+out_of_view:
+  probability: 0.30
+  timestep_range: [60, 120]
+  camera_name: agentview
+  yaw_radians: [0.50, 0.70, 0.90]
+
+counterfactual:
+  paired: true
+  distance_m: 0.10
+  pairs:
+    - relation_type: left_right
+      labels: [left, right]
+    - relation_type: front_behind
+      labels: [front, behind]
+
+metadata_fields:
+  - episode_id
+  - timestep
+  - scenario_type
+  - intervention_flag
+  - pair_id
+  - relation_type
+  - relation_label
+  - difficulty

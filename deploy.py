@@ -32,6 +32,8 @@ class MemVLAService:
         action_ensemble_horizon: int = 2,
         action_chunking: bool = False,
         action_chunking_window: Optional[int] = None,
+        reset_memory_every_step: bool = False,
+        inference_seed: int = 7,
         args=None,
     ) -> None:
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -70,6 +72,8 @@ class MemVLAService:
         self.action_ensemble_horizon = action_ensemble_horizon
         self.action_chunking = action_chunking
         self.action_chunking_window = action_chunking_window
+        self.reset_memory_every_step = reset_memory_every_step
+        self.inference_seed = inference_seed
         if self.action_ensemble:
             self.action_ensembler = AdaptiveEnsembler(self.action_ensemble_horizon, self.adaptive_ensemble_alpha)
         else:
@@ -79,6 +83,9 @@ class MemVLAService:
         self.reset()
 
     def reset(self) -> None:
+        np.random.seed(self.inference_seed)
+        torch.manual_seed(self.inference_seed)
+        torch.cuda.manual_seed_all(self.inference_seed)
         if self.action_ensemble:
             self.action_ensembler.reset()
 
@@ -113,6 +120,7 @@ class MemVLAService:
 
         # save resized image for debugging
         resized_image.save("resized_image.png")
+        memory_first_frame = 'True' if self.reset_memory_every_step else episode_first_frame
         unnormed_actions, normalized_actions = self.vla.predict_action(
             image=resized_image, 
             instruction=task_description,
@@ -120,7 +128,7 @@ class MemVLAService:
             cfg_scale=self.cfg_scale, 
             use_ddim=self.use_ddim, 
             num_ddim_steps=self.num_ddim_steps,
-            episode_first_frame=episode_first_frame,
+            episode_first_frame=memory_first_frame,
         )
 
         if self.action_ensemble:
@@ -194,6 +202,9 @@ parser.add_argument("--action_ensemble_horizon", type=int, default=2)
 parser.add_argument("--adaptive_ensemble_alpha", type=float, default=0.1)
 parser.add_argument("--action_chunking", action="store_true")
 parser.add_argument("--action_chunking_window", type=int, default=None)
+parser.add_argument("--gate_diagnostics_path", type=str, default=None)
+parser.add_argument("--reset_memory_every_step", action="store_true")
+parser.add_argument("--inference_seed", type=int, default=7)
 
 args = parser.parse_args()
 
@@ -227,6 +238,8 @@ inferencer = MemVLAService(
     action_ensemble_horizon=args.action_ensemble_horizon,
     action_chunking=args.action_chunking,
     action_chunking_window=args.action_chunking_window,
+    reset_memory_every_step=args.reset_memory_every_step,
+    inference_seed=args.inference_seed,
     args=args,
 )
 

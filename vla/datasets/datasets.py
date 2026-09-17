@@ -7,6 +7,7 @@ format to OpenVLA, IterableDataset shim.
 
 from dataclasses import dataclass
 import json
+import os
 import pickle
 from pathlib import Path
 from typing import Any, Dict, Tuple, Type
@@ -28,6 +29,7 @@ from vla.datasets.rlds import make_interleaved_dataset, make_single_dataset, \
     make_interleaved_episodic_dataset
 from vla.datasets.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_kwargs_and_weights
 from vla.datasets.rlds.utils.data_utils import NormalizationType
+from vla.datasets.memory_curriculum import MemoryCurriculumConfig, apply_memory_curriculum
 
 # HuggingFace Default / LLaMa-2 IGNORE_INDEX (for labels)
 IGNORE_INDEX = -100
@@ -39,6 +41,7 @@ class RLDSBatchTransform:
     image_transform: ImageTransform
     prompt_builder_fn: Type[PromptBuilder]
     predict_stop_token: bool = True
+    memory_curriculum: MemoryCurriculumConfig = MemoryCurriculumConfig()
 
     def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
         """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
@@ -51,6 +54,9 @@ class RLDSBatchTransform:
             dataset_name, action = rlds_batch["dataset_name"], rlds_batch["action"][0]
 
         img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
+        img, occlusion_flag, occlusion_strength = apply_memory_curriculum(
+            img, rlds_batch, self.memory_curriculum
+        )
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
 
         # Construct Chat-based Prompt
@@ -95,6 +101,8 @@ class RLDSBatchTransform:
                     action_masks=action_mask,
                     timesteps=timesteps,
                     episode_ids=None,
+                    occlusion_flags=np.asarray([occlusion_flag], dtype=np.bool_),
+                    occlusion_strengths=np.asarray([occlusion_strength], dtype=np.float32),
                     )
 
 
@@ -109,6 +117,7 @@ class RoboMMEBatchTransform:
     action_q99: np.ndarray
     action_horizon: int = 16
     image_aug: bool = False
+    memory_curriculum: MemoryCurriculumConfig = MemoryCurriculumConfig()
 
     def __call__(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         image = Image.fromarray(np.asarray(sample["image"], dtype=np.uint8))
@@ -119,6 +128,9 @@ class RoboMMEBatchTransform:
                     tv_transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
                 ]
             )(image)
+        image, occlusion_flag, occlusion_strength = apply_memory_curriculum(
+            image, sample, self.memory_curriculum
+        )
         instruction = str(sample["prompt"]).lower()
 
         prompt_builder = self.prompt_builder_fn("openvla")
@@ -166,6 +178,8 @@ class RoboMMEBatchTransform:
             "action_masks": torch.ones(self.action_horizon, dtype=torch.bool),
             "timesteps": np.asarray(sample["step_idx"], dtype=np.int64).reshape(1),
             "episode_ids": np.asarray(sample["epis_idx"], dtype=np.int64).reshape(1),
+            "occlusion_flags": np.asarray([occlusion_flag], dtype=np.bool_),
+            "occlusion_strengths": np.asarray([occlusion_strength], dtype=np.float32),
         }
 
 
@@ -178,6 +192,7 @@ class RoboMMEPickleDataset(IterableDataset):
         batch_transform: RoboMMEBatchTransform,
         group_size: int = 16,
         seed: int = 42,
+        episode_manifest_path: Path | None = None,
     ) -> None:
         self.data_root_dir = Path(data_root_dir)
         self.data_dir = self.data_root_dir / "data"
@@ -217,6 +232,28 @@ class RoboMMEPickleDataset(IterableDataset):
         self.batch_transform = batch_transform
         self.group_size = group_size
         self.seed = seed
+        self.episode_manifest_path = Path(episode_manifest_path) if episode_manifest_path else None
+        self.manifest = None
+        if self.episode_manifest_path is not None:
+            if not self.episode_manifest_path.is_file():
+                raise FileNotFoundError(f"RoboMME episode manifest not found: {self.episode_manifest_path}")
+            manifest = np.load(self.episode_manifest_path)
+            required = {
+                "sample_indices", "episode_ids", "timesteps", "episode_positions", "episode_lengths"
+            }
+            missing_keys = required - set(manifest.files)
+            if missing_keys:
+                raise ValueError(f"Episode manifest is missing keys: {sorted(missing_keys)}")
+            lengths = {key: len(manifest[key]) for key in required}
+            if len(set(lengths.values())) != 1:
+                raise ValueError(f"Episode manifest arrays have different lengths: {lengths}")
+            if lengths["sample_indices"] % self.group_size:
+                raise ValueError("Episode manifest length must be divisible by group_size")
+            self.manifest = {key: np.asarray(manifest[key]) for key in required}
+            if "source_timesteps" in manifest.files:
+                if len(manifest["source_timesteps"]) != lengths["sample_indices"]:
+                    raise ValueError("source_timesteps has the wrong length")
+                self.manifest["source_timesteps"] = np.asarray(manifest["source_timesteps"])
         self.dataset_statistics = {
             "robomme": {
                 "action": {
@@ -227,7 +264,19 @@ class RoboMMEPickleDataset(IterableDataset):
         }
 
     def __len__(self) -> int:
-        return self.dataset_length
+        return len(self.manifest["sample_indices"]) if self.manifest is not None else self.dataset_length
+
+    def _load_sample(self, sample_idx: int, open_archives: Dict[int, ZipFile]) -> Dict[str, Any]:
+        if self.sample_to_archive is None:
+            with (self.data_dir / f"{sample_idx}.pkl").open("rb") as handle:
+                return pickle.load(handle)
+        archive_idx = int(self.sample_to_archive[sample_idx])
+        archive = open_archives.get(archive_idx)
+        if archive is None:
+            archive = ZipFile(self.archive_paths[archive_idx])
+            open_archives[archive_idx] = archive
+        with archive.open(f"{sample_idx}.pkl") as handle:
+            return pickle.load(handle)
 
     def __iter__(self):
         import torch.distributed as dist
@@ -238,23 +287,38 @@ class RoboMMEPickleDataset(IterableDataset):
         open_archives = {}
         epoch = 0
         while True:
+            active_length = len(self) if self.manifest is not None else self.dataset_length
+            num_groups = (active_length + self.group_size - 1) // self.group_size
             groups = np.arange(num_groups)
             np.random.default_rng(self.seed + epoch).shuffle(groups)
             for group_idx in groups[rank::world_size]:
                 start = int(group_idx) * self.group_size
-                stop = min(start + self.group_size, self.dataset_length)
-                for sample_idx in range(start, stop):
-                    if self.sample_to_archive is None:
-                        with (self.data_dir / f"{sample_idx}.pkl").open("rb") as handle:
-                            sample = pickle.load(handle)
-                    else:
-                        archive_idx = int(self.sample_to_archive[sample_idx])
-                        archive = open_archives.get(archive_idx)
-                        if archive is None:
-                            archive = ZipFile(self.archive_paths[archive_idx])
-                            open_archives[archive_idx] = archive
-                        with archive.open(f"{sample_idx}.pkl") as handle:
-                            sample = pickle.load(handle)
+                stop = min(start + self.group_size, active_length)
+                for manifest_idx in range(start, stop):
+                    sample_idx = (
+                        int(self.manifest["sample_indices"][manifest_idx])
+                        if self.manifest is not None else manifest_idx
+                    )
+                    sample = self._load_sample(sample_idx, open_archives)
+                    if self.manifest is not None:
+                        expected_episode = int(self.manifest["episode_ids"][manifest_idx])
+                        expected_timestep = int(self.manifest["timesteps"][manifest_idx])
+                        source_timestep = int(
+                            self.manifest.get("source_timesteps", self.manifest["timesteps"])[manifest_idx]
+                        )
+                        actual_episode = int(np.asarray(sample["epis_idx"]).reshape(-1)[0])
+                        actual_timestep = int(np.asarray(sample["step_idx"]).reshape(-1)[0])
+                        if (actual_episode, actual_timestep) != (expected_episode, source_timestep):
+                            raise ValueError(
+                                f"Manifest/sample mismatch for {sample_idx}: "
+                                f"{(expected_episode, source_timestep)} != {(actual_episode, actual_timestep)}"
+                            )
+                        # Memory timestep is a contiguous index within the retained
+                        # execution episode; preserve the source timestep separately.
+                        sample["source_step_idx"] = actual_timestep
+                        sample["step_idx"] = np.asarray([expected_timestep], dtype=np.int64)
+                        sample["episode_position"] = int(self.manifest["episode_positions"][manifest_idx])
+                        sample["episode_length"] = int(self.manifest["episode_lengths"][manifest_idx])
                     yield self.batch_transform(sample)
             epoch += 1
 
@@ -273,6 +337,7 @@ class RLDSDataset(IterableDataset):
         load_all_data_for_training: bool = True,
         load_depth=False,
         load_proprio=False,
+        seed: int = 42,
     ) -> None:
         """Lightweight wrapper around RLDS TFDS Pipeline for use with PyTorch/OpenVLA Data Loaders."""
         self.data_root_dir, self.data_mix, self.batch_transform = data_root_dir, data_mix, batch_transform
@@ -294,6 +359,14 @@ class RLDSDataset(IterableDataset):
             load_language=True,
             action_proprio_normalization_type=NormalizationType.BOUNDS_Q99,
         )
+        # TFDS file shuffling has no exposed seed in dlimp. Disable it and use
+        # the explicitly seeded episode/frame shuffle below. Offset by global
+        # rank so ranks see distinct but repeatable streams across matched runs.
+        rank = int(os.environ.get("RANK", "0"))
+        rlds_seed = int(seed) + rank
+        tf.random.set_seed(rlds_seed)
+        for dataset_kwargs in per_dataset_kwargs:
+            dataset_kwargs["shuffle"] = False
         rlds_config = dict(
             traj_transform_kwargs=dict(
                 window_size=1,                                    # If we wanted to feed / predict more than one step
@@ -313,6 +386,7 @@ class RLDSDataset(IterableDataset):
             traj_read_threads=len(mixture_spec),
             train=train,
             load_all_data_for_training=load_all_data_for_training,
+            seed=rlds_seed,
         )
 
         # If applicable, enable image augmentations
@@ -450,7 +524,11 @@ class GroupRLDSDataset(RLDSDataset):
             episode_id += 1
             indices = range(rlds_batch["action"].shape[0])
             for i in indices:
-                frame = self.batch_transform(tree_map(lambda x: x[i], rlds_batch))
+                raw_frame = tree_map(lambda x: x[i], rlds_batch)
+                raw_frame["epis_idx"] = np.asarray([episode_id], dtype=np.int64)
+                raw_frame["episode_position"] = i
+                raw_frame["episode_length"] = rlds_batch["action"].shape[0]
+                frame = self.batch_transform(raw_frame)
                 frame["episode_ids"] = np.array([episode_id])
                 yield frame
 
@@ -471,9 +549,11 @@ class StreamRLDSDataset(RLDSDataset):
             episode_id += 1
             T = rlds_batch["action"].shape[0]
             for i in range(T):
-                frame = self.batch_transform(
-                    tree_map(lambda x: x[i], rlds_batch)
-                )
+                raw_frame = tree_map(lambda x: x[i], rlds_batch)
+                raw_frame["epis_idx"] = np.asarray([episode_id], dtype=np.int64)
+                raw_frame["episode_position"] = i
+                raw_frame["episode_length"] = T
+                frame = self.batch_transform(raw_frame)
                 frame["episode_ids"] = np.array([episode_id])
                 yield frame
 

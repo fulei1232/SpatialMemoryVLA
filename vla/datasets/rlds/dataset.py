@@ -472,6 +472,7 @@ def make_interleaved_dataset(
     traj_transform_threads: Optional[int] = None,
     traj_read_threads: Optional[int] = None,
     load_all_data_for_training: bool = True,
+    seed: Optional[int] = None,
 ) -> dl.DLataset:
     """
     Creates an interleaved dataset from list of dataset configs (kwargs). Returns a dataset of batched frames.
@@ -573,7 +574,7 @@ def make_interleaved_dataset(
         datasets.append(dataset)
 
     # Interleave at the Frame Level
-    dataset: dl.DLataset = dl.DLataset.sample_from_datasets(datasets, sample_weights)
+    dataset: dl.DLataset = dl.DLataset.sample_from_datasets(datasets, sample_weights, seed=seed)
 
     # Validation =>> fix a single shuffle buffer of data and cache it in RAM; prevents gradual memory increase!
     if not train:
@@ -581,7 +582,7 @@ def make_interleaved_dataset(
 
     # Shuffle the Dataset
     #   =>> IMPORTANT :: Shuffle AFTER .cache(), or else memory will still leak!
-    dataset = dataset.shuffle(shuffle_buffer_size)
+    dataset = dataset.shuffle(shuffle_buffer_size, seed=seed, reshuffle_each_iteration=True)
 
     # Apply Frame Transforms
     overwatch.info("Applying frame transforms on dataset...")
@@ -615,6 +616,7 @@ def make_interleaved_episodic_dataset(
     load_all_data_for_training: bool = True,
     group_size: Optional[int] = 0,
     use_optim_group_sample: bool = False,
+    seed: Optional[int] = None,
 ) -> dl.DLataset:
     """
     Creates an interleaved dataset from list of dataset configs (kwargs). Returns a dataset of batched frames.
@@ -724,7 +726,7 @@ def make_interleaved_episodic_dataset(
 
                 # >= k 时随机抽取并排序
                 def sample_case():
-                    shuffled = tf.random.shuffle(tf.range(T))
+                    shuffled = tf.random.shuffle(tf.range(T), seed=seed)
                     return tf.sort(shuffled[:group_size])
 
                 indices = tf.cond(T < group_size, pad_case, sample_case)
@@ -742,7 +744,7 @@ def make_interleaved_episodic_dataset(
         datasets.append(dataset)
 
     # Interleave at the Frame Level
-    dataset: dl.DLataset = dl.DLataset.sample_from_datasets(datasets, sample_weights)
+    dataset: dl.DLataset = dl.DLataset.sample_from_datasets(datasets, sample_weights, seed=seed)
 
     # Validation =>> fix a single shuffle buffer of data and cache it in RAM; prevents gradual memory increase!
     if not train:
@@ -750,7 +752,7 @@ def make_interleaved_episodic_dataset(
 
     # Shuffle the Dataset
     #   =>> IMPORTANT :: Shuffle AFTER .cache(), or else memory will still leak!
-    dataset = dataset.shuffle(shuffle_buffer_size)
+    dataset = dataset.shuffle(shuffle_buffer_size, seed=seed, reshuffle_each_iteration=True)
 
     # Apply Frame Transforms
     overwatch.info("Applying frame transforms on dataset...")

@@ -19,6 +19,15 @@ from libero_utils import (
     save_rollout_video,
 )
 from robot_utils import DATE_TIME, set_seed_everywhere
+from hard_cases import (
+    CameraShiftConfig,
+    RelocationConfig,
+    TemporalOcclusionConfig,
+    apply_temporal_occlusion,
+    relocate_object,
+    set_counterfactual_relation,
+    shift_camera_out_of_view,
+)
 
 # let tensorflow only see CPU
 import tensorflow as tf
@@ -41,11 +50,29 @@ class GenerateConfig:
     model: str = ""
     episode_offset: int = 0
     episode_stride: int = 1
+    hard_case: str = "normal" # normal | relocation | out_of_view | counterfactual
+    intervention_timestep: int = 80
+    target_object: str = ""
+    anchor_object: str = ""
+    relocation_translation: tuple = (0.10, 0.0, 0.0)
+    camera_name: str = "agentview"
+    camera_translation: tuple = (0.0, 0.0, 0.0)
+    camera_yaw_radians: float = 0.7
+    relation_label: str = "left"
+    relation_distance_m: float = 0.10
+    occlusion_partial_start_ratio: float = 0.30
+    occlusion_full_start_ratio: float = 0.50
+    occlusion_recovery_start_ratio: float = 0.75
+    occlusion_partial_max_fraction: float = 0.80
+    occlusion_schedule_steps: int = 16 # policy observations; aligned with memory capacity
+    save_rollout_videos: bool = True
     # fmt: on
 
 
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> None:
+    if cfg.hard_case not in {"normal", "temporal_occlusion", "relocation", "out_of_view", "counterfactual"}:
+        raise ValueError(f"Unsupported hard_case={cfg.hard_case!r}")
     if cfg.spcial_task_id is not None and isinstance(cfg.spcial_task_id, int):
         cfg.spcial_task_id = [cfg.spcial_task_id]
 
@@ -66,9 +93,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
         "task_name",
         "runtime_task_index",
         "initial_state_id",
+        "hard_case",
         "success",
         "policy_calls",
         "timeout",
+        "success_phase",
+        "reached_full_occlusion",
+        "reached_recovery",
+        "recovery_success",
     ]
     print(f"Logging to local log file: {local_log_filepath}")
 
@@ -126,6 +158,41 @@ def eval_libero(cfg: GenerateConfig) -> None:
             initial_state_idx = episode_idx % len(initial_states)
             log_file.write(f"Official initial state index: {initial_state_idx}\n")
             obs = env.set_init_state(initial_states[initial_state_idx])
+            intervention_record = None
+            intervention_applied = False
+            occlusion_phase_counts = {
+                "visible_history": 0,
+                "partial_occlusion": 0,
+                "full_occlusion": 0,
+                "recovered_visible": 0,
+            }
+            temporal_occlusion_cfg = TemporalOcclusionConfig(
+                partial_start_ratio=cfg.occlusion_partial_start_ratio,
+                full_start_ratio=cfg.occlusion_full_start_ratio,
+                recovery_start_ratio=cfg.occlusion_recovery_start_ratio,
+                partial_max_fraction=cfg.occlusion_partial_max_fraction,
+            )
+            if cfg.hard_case == "temporal_occlusion":
+                intervention_record = {
+                    "type": "temporal_occlusion",
+                    "partial_start_ratio": cfg.occlusion_partial_start_ratio,
+                    "full_start_ratio": cfg.occlusion_full_start_ratio,
+                    "recovery_start_ratio": cfg.occlusion_recovery_start_ratio,
+                    "partial_max_fraction": cfg.occlusion_partial_max_fraction,
+                    "schedule_steps": cfg.occlusion_schedule_steps,
+                }
+                intervention_applied = True
+            if cfg.hard_case == "counterfactual":
+                if not cfg.target_object or not cfg.anchor_object:
+                    raise ValueError("counterfactual evaluation requires target_object and anchor_object")
+                obs, intervention_record = set_counterfactual_relation(
+                    env,
+                    cfg.target_object,
+                    cfg.anchor_object,
+                    cfg.relation_label,
+                    cfg.relation_distance_m,
+                )
+                intervention_applied = True
 
             # Setup
             t = 0
@@ -133,6 +200,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             exception_text = None
             policy_calls = 0
             replay_images = []
+            current_occlusion_phase = "normal"
             if cfg.task_suite_name == "libero_spatial":
                 max_steps = 220  # longest training demo has 193 steps
             elif cfg.task_suite_name == "libero_object":
@@ -155,8 +223,49 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         t += 1
                         continue
 
+                    if not intervention_applied and t >= cfg.intervention_timestep:
+                        if cfg.hard_case == "relocation":
+                            if not cfg.target_object:
+                                raise ValueError("relocation evaluation requires target_object")
+                            obs, old_pose, new_pose = relocate_object(
+                                env,
+                                RelocationConfig(
+                                    object_name=cfg.target_object,
+                                    timestep=t,
+                                    translation=tuple(cfg.relocation_translation),
+                                ),
+                            )
+                            intervention_record = {
+                                "type": "relocation", "timestep": t,
+                                "object": cfg.target_object,
+                                "old_pose": old_pose.tolist(), "new_pose": new_pose.tolist(),
+                            }
+                            intervention_applied = True
+                        elif cfg.hard_case == "out_of_view":
+                            obs, _camera_state = shift_camera_out_of_view(
+                                env,
+                                CameraShiftConfig(
+                                    timestep=t,
+                                    camera_name=cfg.camera_name,
+                                    translation=tuple(cfg.camera_translation),
+                                    yaw_radians=cfg.camera_yaw_radians,
+                                ),
+                            )
+                            intervention_record = {
+                                "type": "out_of_view", "timestep": t,
+                                "camera": cfg.camera_name,
+                                "yaw_radians": cfg.camera_yaw_radians,
+                            }
+                            intervention_applied = True
+
                     # Get preprocessed image
                     img = get_libero_image(obs, resize_size)
+                    if cfg.hard_case == "temporal_occlusion":
+                        img, occlusion_phase, _severity = apply_temporal_occlusion(
+                            img, policy_calls, cfg.occlusion_schedule_steps, temporal_occlusion_cfg
+                        )
+                        current_occlusion_phase = occlusion_phase
+                        occlusion_phase_counts[occlusion_phase] += 1
 
                     # Save preprocessed image for replay video
                     replay_images.append(img)
@@ -223,13 +332,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
             total_episodes += 1
 
             # Save a replay video of the episode
-            rollout_dir = os.path.join(cfg.local_log_dir, run_id + "_videos")
-            save_rollout_video(
-                replay_images, total_episodes,
-                success=done, task_description=task_description,
-                log_file=log_file,
-                rollout_dir=rollout_dir,
-            )
+            if cfg.save_rollout_videos:
+                rollout_dir = os.path.join(cfg.local_log_dir, run_id + "_videos")
+                save_rollout_video(
+                    replay_images, total_episodes,
+                    success=done, task_description=task_description,
+                    log_file=log_file,
+                    rollout_dir=rollout_dir,
+                )
 
             # Log current results
             print(f"Success: {done}")
@@ -251,6 +361,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 "steps": int(t),
                 "replay_frames": len(replay_images),
                 "exception": exception_text,
+                "hard_case": cfg.hard_case,
+                "intervention": intervention_record,
+                "occlusion_phase_counts": occlusion_phase_counts,
             }, ensure_ascii=False) + "\n")
             trace_file.flush()
             rollout_record = {
@@ -258,9 +371,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 "task_name": task_description,
                 "runtime_task_index": task_id,
                 "initial_state_id": initial_state_idx,
+                "hard_case": cfg.hard_case,
                 "success": bool(done),
                 "policy_calls": policy_calls,
                 "timeout": bool((not done) and exception_text is None and t >= max_steps),
+                "success_phase": current_occlusion_phase if done else None,
+                "reached_full_occlusion": occlusion_phase_counts["full_occlusion"] > 0,
+                "reached_recovery": occlusion_phase_counts["recovered_visible"] > 0,
+                "recovery_success": bool(done and occlusion_phase_counts["recovered_visible"] > 0),
             }
             with open(rollout_jsonl_path, "a") as rollout_jsonl:
                 rollout_jsonl.write(json.dumps(rollout_record, ensure_ascii=False) + "\n")

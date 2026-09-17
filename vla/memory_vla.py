@@ -4,7 +4,9 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Type, Union, Tuple
 from copy import deepcopy
+import csv
 import math
+import os
 import numpy as np
 from PIL import Image
 
@@ -153,6 +155,10 @@ class GateFusion(nn.Module):
         )
 
         fused = scale * x1 + (1 - scale) * x2
+        self.last_scale_stats = (
+            float(scale.detach().float().mean().cpu()),
+            float(scale.detach().float().std(unbiased=False).cpu()),
+        )
         return fused
 
 
@@ -199,6 +205,7 @@ class CogMemBank(nn.Module):
             self.timestep_encoder = None
 
         self.reset()
+        self.last_gate_records = []
 
     def reset(self):
         # bank[episode_id] = [(timestep, feat[N,D]), ...]
@@ -264,6 +271,7 @@ class CogMemBank(nn.Module):
 
         B, N, D = tokens.shape
         outputs = []
+        self.last_gate_records = []
 
         if self.training:
             if self.dataloader_type == 'group':
@@ -319,6 +327,21 @@ class CogMemBank(nn.Module):
                 fused_feats = (working_mem + retrieved_episode_mem) * 0.5
             elif self.fusion_type == 'gate':
                 fused_feats = self.gate_fusion_blocks(working_mem, retrieved_episode_mem)
+                alpha_mean, alpha_std = self.gate_fusion_blocks.last_scale_stats
+                timestep_value = timesteps[i] if timesteps is not None else -1
+                if isinstance(timestep_value, torch.Tensor):
+                    timestep_value = int(timestep_value.detach().cpu().item())
+                else:
+                    timestep_value = int(np.asarray(timestep_value).reshape(-1)[0])
+                self.last_gate_records.append(
+                    {
+                        "episode_id": int(np.asarray(eid).reshape(-1)[0]),
+                        "timestep": timestep_value,
+                        "alpha_mean": alpha_mean,
+                        "alpha_std": alpha_std,
+                        "history_size": len(hist),
+                    }
+                )
 
             outputs.append(fused_feats)
 
@@ -384,6 +407,7 @@ class MemoryVLA(nn.Module):
         spatial_teacher_dim: int = 2048,
         use_vlm_norm: bool = False,
         spatial_debug_asserts: bool = True,
+        gate_diagnostics_path: Optional[Path] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -412,6 +436,7 @@ class MemoryVLA(nn.Module):
         self.spatial_teacher_dim = spatial_teacher_dim
         self.spatial_debug_asserts = spatial_debug_asserts
         self._spatial_contract_logged = False
+        self.gate_diagnostics_path = Path(gate_diagnostics_path) if gate_diagnostics_path else None
 
         self.cur_timestep = 0
 
@@ -585,6 +610,8 @@ class MemoryVLA(nn.Module):
         return_dict: Optional[bool] = None,
         repeated_diffusion_steps: int = 4,
         spatial_target: Optional[torch.Tensor] = None,
+        occlusion_flags: Optional[np.ndarray] = None,
+        occlusion_strengths: Optional[np.ndarray] = None,
     ) -> Tuple:
         """Run a forward pass through the VLM, returning a CausalLMOutputWithPast instance (contains loss)."""
 
@@ -630,6 +657,7 @@ class MemoryVLA(nn.Module):
             episode_ids=episode_ids,
             timesteps=timesteps,
         )
+        self._write_gate_diagnostics(occlusion_flags, occlusion_strengths)
 
         # Repeat 'actions' 'repeated_diffusion_steps' times, resulting in [repeated_diffusion_steps*B, T, D]
         actions_future = actions[:, -(self.future_action_window_size+1):, :]
@@ -672,10 +700,59 @@ class MemoryVLA(nn.Module):
             "spatial_loss": spatial_loss.detach() if spatial_loss is not None else torch.zeros_like(action_loss),
             "spatial_weighted_ratio": spatial_weighted_loss.detach() / action_loss.detach().abs().clamp_min(1e-8),
         }
+        if self.fusion_type == "gate" and self.per_mem_bank.last_gate_records:
+            spatial_metrics["per_gate_alpha"] = action_loss.new_tensor(
+                np.mean([record["alpha_mean"] for record in self.per_mem_bank.last_gate_records])
+            )
+            spatial_metrics["cog_gate_alpha"] = action_loss.new_tensor(
+                np.mean([record["alpha_mean"] for record in self.cog_mem_bank.last_gate_records])
+            )
 
         # Return metrics explicitly. Root FSDP may rebuild ModelOutput from
         # its declared dataclass fields and discard extension mapping entries.
         return loss, output, spatial_metrics
+
+    def _write_gate_diagnostics(
+        self,
+        occlusion_flags: Optional[np.ndarray],
+        occlusion_strengths: Optional[np.ndarray],
+    ) -> None:
+        if self.gate_diagnostics_path is None or self.fusion_type != "gate":
+            return
+        cognitive = self.cog_mem_bank.last_gate_records
+        perception = self.per_mem_bank.last_gate_records
+        if len(cognitive) != len(perception):
+            raise RuntimeError("Cognitive and perception gate diagnostics are misaligned")
+        rank = int(os.environ.get("RANK", "0"))
+        output_path = self.gate_diagnostics_path
+        if rank:
+            output_path = output_path.with_name(f"{output_path.stem}_rank{rank}{output_path.suffix}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fields = [
+            "episode_id", "timestep", "occlusion_flag", "occlusion_strength", "history_size",
+            "cog_alpha_mean", "cog_alpha_std", "per_alpha_mean", "per_alpha_std",
+        ]
+        write_header = not output_path.exists()
+        with output_path.open("a", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            if write_header:
+                writer.writeheader()
+            for index, (cog, per) in enumerate(zip(cognitive, perception)):
+                writer.writerow(
+                    {
+                        "episode_id": per["episode_id"],
+                        "timestep": per["timestep"],
+                        "occlusion_flag": bool(occlusion_flags[index]) if occlusion_flags is not None else False,
+                        "occlusion_strength": (
+                            float(occlusion_strengths[index]) if occlusion_strengths is not None else 0.0
+                        ),
+                        "history_size": per["history_size"],
+                        "cog_alpha_mean": cog["alpha_mean"],
+                        "cog_alpha_std": cog["alpha_std"],
+                        "per_alpha_mean": per["alpha_mean"],
+                        "per_alpha_std": per["alpha_std"],
+                    }
+                )
 
     def get_fsdp_wrapping_policy(self) -> Callable:
         """Return an FSDP _or_policy over the policies returned by each individual backbone (and our VLM policy)."""
@@ -914,6 +991,7 @@ class MemoryVLA(nn.Module):
             episode_ids=episode_ids,
             timesteps=timesteps,
         )
+        self._write_gate_diagnostics(None, None)
 
         # Sample random noise
         B = cog_tokens.shape[0]
@@ -968,7 +1046,9 @@ class MemoryVLA(nn.Module):
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
         normalized_actions = np.clip(normalized_actions, -1, 1)
-        normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < 0.5, 0, 1) 
+        normalized_actions[:, self.action_dim - 1] = np.where(
+            normalized_actions[:, self.action_dim - 1] < 0.5, 0, 1
+        )
         actions = np.where(
             mask,
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,

@@ -92,6 +92,18 @@ class TrainConfig:
     use_vlm_norm: bool = False
     spatial_debug_asserts: bool = True
 
+    # Episode-aware temporal-memory curriculum. Large generated artifacts live
+    # under the shared storage root, not in the source checkout.
+    episode_manifest_path: Optional[Path] = None
+    memory_curriculum_enabled: bool = False
+    memory_curriculum_type: str = "normal"
+    occlusion_probability: float = 0.5
+    occlusion_start_ratio: float = 0.4
+    occlusion_duration_ratio: float = 0.2
+    occlusion_recovery_ratio: Optional[float] = None
+    occlusion_strength: str = "full"
+    gate_diagnostics_path: Optional[Path] = None
+
 
     def __post_init__(self) -> None:
         """Lift optimization parameters from `self.vla` for ease of use =>> validate on `expected_world_size`"""
@@ -285,6 +297,14 @@ def train(cfg: TrainConfig) -> None:
         dataloader_type=cfg.dataloader_type,
         group_size=cfg.group_size,
         seed=cfg.seed,
+        episode_manifest_path=cfg.episode_manifest_path,
+        memory_curriculum_enabled=cfg.memory_curriculum_enabled,
+        memory_curriculum_type=cfg.memory_curriculum_type,
+        occlusion_probability=cfg.occlusion_probability,
+        occlusion_start_ratio=cfg.occlusion_start_ratio,
+        occlusion_duration_ratio=cfg.occlusion_duration_ratio,
+        occlusion_recovery_ratio=cfg.occlusion_recovery_ratio,
+        occlusion_strength=cfg.occlusion_strength,
     )
 
     # Save dataset statistics for de-normalization at inference time

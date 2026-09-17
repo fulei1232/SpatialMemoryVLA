@@ -187,6 +187,8 @@ class TrainingStrategy(ABC):
                         labels=batch["labels"],
                         timesteps=batch["timesteps"],
                         episode_ids=batch["episode_ids"],
+                        occlusion_flags=batch.get("occlusion_flags"),
+                        occlusion_strengths=batch.get("occlusion_strengths"),
                         output_hidden_states=True,
                         repeated_diffusion_steps=repeated_diffusion_steps,
                         spatial_target=spatial_target,

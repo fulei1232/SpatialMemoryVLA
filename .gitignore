@@ -147,6 +147,8 @@ dmypy.json
 # Caches and Datasets
 cache/
 data/
+!script/data/
+!script/data/*.py
 pretrained/
 third_libs/
 .libero/
