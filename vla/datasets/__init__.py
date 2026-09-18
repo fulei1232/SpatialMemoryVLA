@@ -4,6 +4,8 @@ from .datasets import (
     GroupRLDSDataset,
     RLDSBatchTransform,
     RLDSDataset,
+    LiberoRelocationBatchTransform,
+    LiberoRelocationNPZDataset,
     RoboMMEBatchTransform,
     RoboMMEPickleDataset,
     StreamRLDSDataset,

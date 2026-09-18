@@ -530,7 +530,116 @@ class GroupRLDSDataset(RLDSDataset):
                 raw_frame["episode_length"] = rlds_batch["action"].shape[0]
                 frame = self.batch_transform(raw_frame)
                 frame["episode_ids"] = np.array([episode_id])
-                yield frame
+            yield frame
+
+
+@dataclass
+class LiberoRelocationBatchTransform:
+    """Convert one frame from a successful relocation rollout into VLA inputs."""
+
+    base_tokenizer: PreTrainedTokenizerBase
+    image_transform: ImageTransform
+    prompt_builder_fn: Type[PromptBuilder]
+    action_q01: np.ndarray
+    action_q99: np.ndarray
+    action_horizon: int = 16
+
+    def __call__(self, episode: Dict[str, Any], position: int) -> Dict[str, Any]:
+        image = Image.fromarray(np.asarray(episode["images"][position], dtype=np.uint8))
+        instruction = str(np.asarray(episode["instruction"]).item()).lower()
+        prompt_builder = self.prompt_builder_fn("openvla")
+        for turn in (
+            {"from": "human", "value": f"What action should the robot take to {instruction}?"},
+            {"from": "gpt", "value": ""},
+        ):
+            prompt_builder.add_turn(turn["from"], turn["value"])
+        input_ids = torch.tensor(
+            self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+        )
+        labels = input_ids.clone()
+        eos_positions = torch.where(input_ids == 2)[0]
+        if len(eos_positions) == 0:
+            raise ValueError("Relocation prompt is missing the expected Llama EOS token (id=2)")
+        labels[: int(eos_positions[0])] = IGNORE_INDEX
+
+        raw_actions = np.asarray(episode["actions"], dtype=np.float32)
+        standardized = raw_actions.copy()
+        # Raw LIBERO uses -1=open, +1=close. Match libero_dataset_transform:
+        # clip to [0,1], invert, yielding 1=open and 0=close.
+        standardized[:, 6] = 1.0 - np.clip(standardized[:, 6], 0.0, 1.0)
+        normalized = standardized.copy()
+        normalized[:, :6] = np.clip(
+            2.0 * (standardized[:, :6] - self.action_q01[None, :6])
+            / (self.action_q99[None, :6] - self.action_q01[None, :6] + 1e-8)
+            - 1.0,
+            -1.0,
+            1.0,
+        )
+        end = min(len(normalized), position + self.action_horizon)
+        valid = normalized[position:end]
+        actions = np.zeros((self.action_horizon, 7), dtype=np.float32)
+        actions[: len(valid)] = valid
+        if len(valid) < self.action_horizon:
+            actions[len(valid) :, 6] = valid[-1, 6]
+        action_mask = np.zeros(self.action_horizon, dtype=np.bool_)
+        action_mask[: len(valid)] = True
+
+        return {
+            "pixel_values": self.image_transform(image),
+            "input_ids": input_ids,
+            "labels": labels,
+            "dataset_name": "libero_relocation_npz",
+            "actions": torch.from_numpy(actions),
+            "action_masks": torch.from_numpy(action_mask),
+            "timesteps": np.asarray([position], dtype=np.int64),
+            "episode_ids": np.asarray([int(episode["runtime_episode_id"])], dtype=np.int64),
+            "occlusion_flags": np.asarray([False], dtype=np.bool_),
+            "occlusion_strengths": np.asarray([0.0], dtype=np.float32),
+        }
+
+
+class LiberoRelocationNPZDataset(IterableDataset):
+    """Rank-sharded infinite stream that preserves complete episode ordering."""
+
+    def __init__(self, data_root_dir: Path, batch_transform: LiberoRelocationBatchTransform, seed: int = 42) -> None:
+        self.data_root_dir = Path(data_root_dir)
+        self.episode_paths = sorted((self.data_root_dir / "episodes").glob("episode-*.npz"))
+        if not self.episode_paths:
+            raise FileNotFoundError(f"No relocation episodes found under {self.data_root_dir / 'episodes'}")
+        self.batch_transform = batch_transform
+        self.seed = int(seed)
+        lengths = []
+        for path in self.episode_paths:
+            with np.load(path, allow_pickle=False) as episode:
+                length = len(episode["actions"])
+                if length <= 0 or not np.array_equal(episode["timesteps"], np.arange(length)):
+                    raise ValueError(f"Non-contiguous or empty episode: {path}")
+                if not bool(np.any(episode["relocation_flags"])):
+                    raise ValueError(f"Episode never reaches relocation phase: {path}")
+                lengths.append(length)
+        self.dataset_length = int(sum(lengths))
+        stats = json.loads((self.data_root_dir / "action_stats.json").read_text())
+        self.dataset_statistics = {"libero_spatial_no_noops": stats}
+
+    def __len__(self) -> int:
+        return self.dataset_length
+
+    def __iter__(self) -> Dict[str, Any]:
+        rank = int(os.environ.get("RANK", "0"))
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        epoch = 0
+        while True:
+            indices = np.arange(len(self.episode_paths))
+            np.random.default_rng(self.seed + epoch).shuffle(indices)
+            rank_indices = indices[rank::world_size]
+            for local_index in rank_indices:
+                path = self.episode_paths[int(local_index)]
+                with np.load(path, allow_pickle=False) as loaded:
+                    episode = {key: loaded[key] for key in loaded.files}
+                episode["runtime_episode_id"] = epoch * len(self.episode_paths) + int(local_index)
+                for position in range(len(episode["actions"])):
+                    yield self.batch_transform(episode, position)
+            epoch += 1
 
 
 class StreamRLDSDataset(RLDSDataset):

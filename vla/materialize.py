@@ -22,6 +22,8 @@ from vla.datasets import (
     GroupRLDSDataset,
     RLDSBatchTransform,
     RLDSDataset,
+    LiberoRelocationBatchTransform,
+    LiberoRelocationNPZDataset,
     RoboMMEBatchTransform,
     RoboMMEPickleDataset,
     StreamRLDSDataset,
@@ -80,6 +82,23 @@ def get_vla_dataset_and_collator(
     collator = PaddedCollatorForActionPrediction(
         tokenizer.model_max_length, tokenizer.pad_token_id, padding_side=padding_side,
     )
+
+    if data_mix == "libero_relocation_npz":
+        stats = json.loads((Path(data_root_dir) / "action_stats.json").read_text())
+        transform = LiberoRelocationBatchTransform(
+            base_tokenizer=tokenizer,
+            image_transform=image_transform,
+            prompt_builder_fn=prompt_builder_fn,
+            action_q01=np.asarray(stats["action"]["q01"], dtype=np.float32),
+            action_q99=np.asarray(stats["action"]["q99"], dtype=np.float32),
+            action_horizon=future_action_window_size + 1,
+        )
+        dataset = LiberoRelocationNPZDataset(
+            data_root_dir=data_root_dir,
+            batch_transform=transform,
+            seed=seed,
+        )
+        return dataset, action_tokenizer, collator
 
     if data_mix == "robomme":
         norm_stats_path = Path(data_root_dir) / "meta" / "norm_stats.json"

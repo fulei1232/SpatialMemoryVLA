@@ -7,6 +7,7 @@ from evaluation.libero.hard_cases import (
     get_object_pose,
     relocate_object,
     set_counterfactual_relation,
+    unexpected_object_contacts,
 )
 
 
@@ -73,6 +74,30 @@ def test_relocation_changes_physical_pose():
     _, old_pose, new_pose = relocate_object(env, RelocationConfig("bowl", 4, (0.10, -0.05, 0.0)))
     np.testing.assert_allclose(new_pose[:3] - old_pose[:3], [0.10, -0.05, 0.0])
     np.testing.assert_allclose(get_object_pose(env, "bowl"), new_pose)
+
+
+def test_relocation_rejects_pose_outside_workspace_before_mutating_state():
+    env = FakeEnv()
+    old_pose = get_object_pose(env, "bowl")
+    cfg = RelocationConfig(
+        "bowl", 4, (0.10, 0.0, 0.0), workspace_x_bounds=(-0.05, 0.05)
+    )
+    try:
+        relocate_object(env, cfg)
+    except ValueError as exc:
+        assert "outside workspace" in str(exc)
+    else:
+        raise AssertionError("Expected unsafe relocation to be rejected")
+    np.testing.assert_allclose(get_object_pose(env, "bowl"), old_pose)
+
+
+def test_support_surface_contacts_are_not_reported_as_collisions():
+    contacts = [
+        ("table_collision", "bowl_g1"),
+        ("bowl_g2", "robot0_right_gripper"),
+        ("bowl_g3", "plate_g1"),
+    ]
+    assert unexpected_object_contacts(contacts) == contacts[1:]
 
 
 def test_counterfactual_pair_changes_only_relation_pose():

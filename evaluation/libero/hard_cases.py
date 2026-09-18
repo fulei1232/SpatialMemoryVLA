@@ -102,12 +102,26 @@ class RelocationConfig:
     timestep: int
     translation: tuple[float, float, float]
     yaw_radians: float = 0.0
+    workspace_x_bounds: tuple[float, float] | None = None
+    workspace_y_bounds: tuple[float, float] | None = None
 
 
 def relocate_object(env: Any, cfg: RelocationConfig) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
     old_pose = get_object_pose(env, cfg.object_name)
     new_pose = old_pose.copy()
     new_pose[:3] += np.asarray(cfg.translation, dtype=np.float64)
+    if cfg.workspace_x_bounds is not None and not (
+        cfg.workspace_x_bounds[0] <= new_pose[0] <= cfg.workspace_x_bounds[1]
+    ):
+        raise ValueError(
+            f"Relocation x={new_pose[0]:.4f} is outside workspace bounds {cfg.workspace_x_bounds}"
+        )
+    if cfg.workspace_y_bounds is not None and not (
+        cfg.workspace_y_bounds[0] <= new_pose[1] <= cfg.workspace_y_bounds[1]
+    ):
+        raise ValueError(
+            f"Relocation y={new_pose[1]:.4f} is outside workspace bounds {cfg.workspace_y_bounds}"
+        )
     if cfg.yaw_radians:
         half = cfg.yaw_radians / 2.0
         yaw_quaternion = np.asarray([np.cos(half), 0.0, 0.0, np.sin(half)])
@@ -121,6 +135,31 @@ def relocate_object(env: Any, cfg: RelocationConfig) -> tuple[dict[str, Any], np
         ]
     observation = set_object_pose(env, cfg.object_name, new_pose)
     return observation, old_pose, new_pose
+
+
+def get_object_contacts(env: Any, object_name: str) -> list[tuple[str, str]]:
+    """Return current contact pairs involving an object's collision geoms."""
+    core = _core_env(env)
+    if object_name not in core.objects_dict:
+        raise KeyError(f"Unknown object {object_name!r}")
+    target_geoms = set(core.objects_dict[object_name].contact_geoms)
+    contacts: list[tuple[str, str]] = []
+    for index in range(core.sim.data.ncon):
+        contact = core.sim.data.contact[index]
+        first = core.sim.model.geom_id2name(contact.geom1) or f"geom-{contact.geom1}"
+        second = core.sim.model.geom_id2name(contact.geom2) or f"geom-{contact.geom2}"
+        if first in target_geoms or second in target_geoms:
+            contacts.append((first, second))
+    return contacts
+
+
+def unexpected_object_contacts(contacts: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Exclude support-surface contacts while retaining robot/object collisions."""
+    support_markers = ("table", "floor")
+    return [
+        pair for pair in contacts
+        if not any(marker in geom.lower() for geom in pair for marker in support_markers)
+    ]
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,7 @@
 import os
 import json
 import csv
+import hashlib
 from dataclasses import dataclass
 from typing import List, Union
 import draccus
@@ -24,9 +25,12 @@ from hard_cases import (
     RelocationConfig,
     TemporalOcclusionConfig,
     apply_temporal_occlusion,
+    get_object_contacts,
+    get_object_pose,
     relocate_object,
     set_counterfactual_relation,
     shift_camera_out_of_view,
+    unexpected_object_contacts,
 )
 
 # let tensorflow only see CPU
@@ -52,9 +56,15 @@ class GenerateConfig:
     episode_stride: int = 1
     hard_case: str = "normal" # normal | relocation | out_of_view | counterfactual
     intervention_timestep: int = 80
+    intervention_policy_call: int = -1 # >=0 overrides intervention_timestep
     target_object: str = ""
     anchor_object: str = ""
     relocation_translation: tuple = (0.10, 0.0, 0.0)
+    relocation_workspace_x_bounds: tuple = (-0.30, 0.30)
+    relocation_workspace_y_bounds: tuple = (0.10, 0.50)
+    relocation_dx: Union[float, None] = None # scalar CLI override for tuple fields
+    relocation_dy: Union[float, None] = None
+    relocation_dz: Union[float, None] = None
     camera_name: str = "agentview"
     camera_translation: tuple = (0.0, 0.0, 0.0)
     camera_yaw_radians: float = 0.7
@@ -66,6 +76,8 @@ class GenerateConfig:
     occlusion_partial_max_fraction: float = 0.80
     occlusion_schedule_steps: int = 16 # policy observations; aligned with memory capacity
     save_rollout_videos: bool = True
+    successful_episode_dir: Union[str, None] = None
+    max_successful_episodes: Union[int, None] = None
     # fmt: on
 
 
@@ -93,6 +105,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         "task_name",
         "runtime_task_index",
         "initial_state_id",
+        "episode_id",
         "hard_case",
         "success",
         "policy_calls",
@@ -101,6 +114,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
         "reached_full_occlusion",
         "reached_recovery",
         "recovery_success",
+        "intervention_applied",
+        "intervention_timestep",
+        "intervention_policy_call",
+        "relocation_safe",
     ]
     print(f"Logging to local log file: {local_log_filepath}")
 
@@ -145,6 +162,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
         # Start episodes
         task_episodes, task_successes = 0, 0
         for local_episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
+            if cfg.max_successful_episodes is not None and task_successes >= cfg.max_successful_episodes:
+                break
             episode_idx = cfg.episode_offset + local_episode_idx * cfg.episode_stride
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
@@ -160,6 +179,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
             obs = env.set_init_state(initial_states[initial_state_idx])
             intervention_record = None
             intervention_applied = False
+            relocation_safe = None
+            min_eef_distance_to_old = None
+            min_eef_distance_to_new = None
+            episode_samples = []
             occlusion_phase_counts = {
                 "visible_history": 0,
                 "partial_occlusion": 0,
@@ -223,22 +246,79 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         t += 1
                         continue
 
-                    if not intervention_applied and t >= cfg.intervention_timestep:
+                    intervention_due = (
+                        policy_calls >= cfg.intervention_policy_call
+                        if cfg.intervention_policy_call >= 0
+                        else t >= cfg.intervention_timestep
+                    )
+                    if not intervention_applied and intervention_due:
                         if cfg.hard_case == "relocation":
                             if not cfg.target_object:
                                 raise ValueError("relocation evaluation requires target_object")
+                            scalar_translation = (cfg.relocation_dx, cfg.relocation_dy, cfg.relocation_dz)
+                            if any(value is not None for value in scalar_translation):
+                                if not all(value is not None for value in scalar_translation):
+                                    raise ValueError("relocation_dx/dy/dz must be provided together")
+                                relocation_translation = tuple(float(value) for value in scalar_translation)
+                            else:
+                                relocation_translation = tuple(cfg.relocation_translation)
+                            timestep_before = t
+                            policy_calls_before = policy_calls
+                            image_before = get_libero_image(obs, resize_size)
+                            contacts_before = get_object_contacts(env, cfg.target_object)
                             obs, old_pose, new_pose = relocate_object(
                                 env,
                                 RelocationConfig(
                                     object_name=cfg.target_object,
                                     timestep=t,
-                                    translation=tuple(cfg.relocation_translation),
+                                    translation=relocation_translation,
+                                    workspace_x_bounds=tuple(cfg.relocation_workspace_x_bounds),
+                                    workspace_y_bounds=tuple(cfg.relocation_workspace_y_bounds),
                                 ),
+                            )
+                            actual_pose = get_object_pose(env, cfg.target_object)
+                            contacts_after = get_object_contacts(env, cfg.target_object)
+                            unexpected_contacts_before = unexpected_object_contacts(contacts_before)
+                            unexpected_contacts_after = unexpected_object_contacts(contacts_after)
+                            image_after = get_libero_image(obs, resize_size)
+                            expected_delta = np.asarray(relocation_translation, dtype=np.float64)
+                            actual_delta = actual_pose[:3] - old_pose[:3]
+                            pose_error = float(np.linalg.norm(actual_pose - new_pose))
+                            xy_in_workspace = bool(
+                                cfg.relocation_workspace_x_bounds[0] <= actual_pose[0] <= cfg.relocation_workspace_x_bounds[1]
+                                and cfg.relocation_workspace_y_bounds[0] <= actual_pose[1] <= cfg.relocation_workspace_y_bounds[1]
+                            )
+                            relocation_safe = bool(
+                                xy_in_workspace
+                                and abs(actual_pose[2] - old_pose[2]) < 1e-6
+                                and np.linalg.norm(actual_delta - expected_delta) < 1e-6
+                                and pose_error < 1e-6
+                                and not unexpected_contacts_after
                             )
                             intervention_record = {
                                 "type": "relocation", "timestep": t,
+                                "timestep_before": timestep_before,
+                                "timestep_after": t,
+                                "policy_calls_before": policy_calls_before,
                                 "object": cfg.target_object,
                                 "old_pose": old_pose.tolist(), "new_pose": new_pose.tolist(),
+                                "actual_pose_after_refresh": actual_pose.tolist(),
+                                "actual_translation": actual_delta.tolist(),
+                                "pose_error": pose_error,
+                                "observation_mean_abs_diff": float(
+                                    np.mean(np.abs(image_after.astype(np.float32) - image_before.astype(np.float32)))
+                                ),
+                                "contacts_before": contacts_before,
+                                "contacts_after": contacts_after,
+                                "unexpected_contacts_before": unexpected_contacts_before,
+                                "unexpected_contacts_after": unexpected_contacts_after,
+                                "target_not_grasped_before": not any(
+                                    "gripper" in geom.lower() or "robot" in geom.lower()
+                                    for pair in contacts_before for geom in pair
+                                ),
+                                "xy_in_workspace": xy_in_workspace,
+                                "z_unchanged": bool(abs(actual_pose[2] - old_pose[2]) < 1e-6),
+                                "safe": relocation_safe,
                             }
                             intervention_applied = True
                         elif cfg.hard_case == "out_of_view":
@@ -310,8 +390,32 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     for i in range(chunk_size):
                         action_chunk = action[i * action_dim:(i + 1) * action_dim]
 
+                        if cfg.successful_episode_dir is not None:
+                            episode_samples.append({
+                                "image": get_libero_image(obs, resize_size),
+                                "action": action_chunk.astype(np.float32, copy=True),
+                                "state": np.concatenate((
+                                    obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]),
+                                    obs["robot0_gripper_qpos"],
+                                )).astype(np.float32),
+                                "joint_state": np.asarray(obs["robot0_joint_pos"], dtype=np.float32),
+                                "relocation_flag": bool(intervention_applied),
+                            })
+
                         # Execute action in environment
                         obs, reward, done, info = env.step(action_chunk)
+                        if cfg.hard_case == "relocation" and intervention_applied:
+                            eef_position = np.asarray(obs["robot0_eef_pos"], dtype=np.float64)
+                            distance_to_old = float(np.linalg.norm(eef_position - old_pose[:3]))
+                            distance_to_new = float(np.linalg.norm(eef_position - new_pose[:3]))
+                            min_eef_distance_to_old = (
+                                distance_to_old if min_eef_distance_to_old is None
+                                else min(min_eef_distance_to_old, distance_to_old)
+                            )
+                            min_eef_distance_to_new = (
+                                distance_to_new if min_eef_distance_to_new is None
+                                else min(min_eef_distance_to_new, distance_to_new)
+                            )
                         if done:
                             task_successes += 1
                             total_successes += 1
@@ -330,6 +434,50 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             task_episodes += 1
             total_episodes += 1
+            if cfg.hard_case == "relocation" and intervention_record:
+                intervention_record["min_eef_distance_to_old"] = min_eef_distance_to_old
+                intervention_record["min_eef_distance_to_new"] = min_eef_distance_to_new
+                intervention_record["final_object_pose"] = get_object_pose(
+                    env, cfg.target_object
+                ).tolist()
+            if done and cfg.successful_episode_dir is not None:
+                output_dir = os.path.abspath(cfg.successful_episode_dir)
+                os.makedirs(output_dir, exist_ok=True)
+                episode_key = (
+                    f"{cfg.model}|{cfg.seed}|{task_id}|{episode_idx}|"
+                    f"{cfg.intervention_policy_call}|{cfg.relocation_dx}|{cfg.relocation_dy}|{cfg.relocation_dz}"
+                )
+                digest = hashlib.sha256(episode_key.encode()).hexdigest()[:16]
+                output_path = os.path.join(output_dir, f"episode-{digest}.npz")
+                np.savez_compressed(
+                    output_path,
+                    images=np.stack([sample["image"] for sample in episode_samples]),
+                    actions=np.stack([sample["action"] for sample in episode_samples]),
+                    states=np.stack([sample["state"] for sample in episode_samples]),
+                    joint_states=np.stack([sample["joint_state"] for sample in episode_samples]),
+                    timesteps=np.arange(len(episode_samples), dtype=np.int64),
+                    relocation_flags=np.asarray(
+                        [sample["relocation_flag"] for sample in episode_samples], dtype=np.bool_
+                    ),
+                    instruction=np.asarray(task_description),
+                    task_id=np.asarray(task_id, dtype=np.int64),
+                    initial_state_id=np.asarray(initial_state_idx, dtype=np.int64),
+                    source_episode_index=np.asarray(episode_idx, dtype=np.int64),
+                    seed=np.asarray(cfg.seed, dtype=np.int64),
+                    intervention_timestep=np.asarray(
+                        intervention_record["timestep"] if intervention_record else -1, dtype=np.int64
+                    ),
+                    old_pose=np.asarray(
+                        intervention_record["old_pose"] if intervention_record else np.full(7, np.nan),
+                        dtype=np.float64,
+                    ),
+                    new_pose=np.asarray(
+                        intervention_record["new_pose"] if intervention_record else np.full(7, np.nan),
+                        dtype=np.float64,
+                    ),
+                )
+                if log_file:
+                    log_file.write(f"Saved successful episode: {output_path}\n")
 
             # Save a replay video of the episode
             if cfg.save_rollout_videos:
@@ -371,6 +519,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 "task_name": task_description,
                 "runtime_task_index": task_id,
                 "initial_state_id": initial_state_idx,
+                "episode_id": f"{cfg.task_suite_name}/task-{task_id}/state-{initial_state_idx}",
                 "hard_case": cfg.hard_case,
                 "success": bool(done),
                 "policy_calls": policy_calls,
@@ -379,6 +528,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 "reached_full_occlusion": occlusion_phase_counts["full_occlusion"] > 0,
                 "reached_recovery": occlusion_phase_counts["recovered_visible"] > 0,
                 "recovery_success": bool(done and occlusion_phase_counts["recovered_visible"] > 0),
+                "intervention_applied": intervention_applied,
+                "intervention_timestep": (
+                    intervention_record.get("timestep") if intervention_record else None
+                ),
+                "intervention_policy_call": (
+                    intervention_record.get("policy_calls_before") if intervention_record else None
+                ),
+                "relocation_safe": relocation_safe,
             }
             with open(rollout_jsonl_path, "a") as rollout_jsonl:
                 rollout_jsonl.write(json.dumps(rollout_record, ensure_ascii=False) + "\n")
